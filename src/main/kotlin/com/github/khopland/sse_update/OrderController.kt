@@ -9,7 +9,10 @@ import org.springframework.web.bind.annotation.RestController
 
 
 @RestController
-class TaskController(private val taskReposetory: TaskReposetory) {
+class TaskController(
+    private val taskReposetory: TaskReposetory,
+    private val notificationService: NotificationService
+) {
 
     @GetMapping("/task")
     fun getTasks(): List<Task> {
@@ -23,7 +26,10 @@ class TaskController(private val taskReposetory: TaskReposetory) {
 
     @PostMapping("/task")
     fun saveTask(@RequestBody task: Task): Task {
-        return taskReposetory.save(task)
+
+        val savedTask = taskReposetory.save(task)
+        notificationService.broadcastNotification("task", "crate:${task.id}")
+        return savedTask
     }
 
     @PutMapping("/task/{id}")
@@ -34,12 +40,18 @@ class TaskController(private val taskReposetory: TaskReposetory) {
             .apply {
                 description = task.description
             }
-        return taskReposetory.save(updatedTask)
+        val savedTask = taskReposetory.save(updatedTask)
+        notificationService.broadcastNotification("task", "update:${savedTask.id}")
+        return savedTask
     }
 
     @DeleteMapping("/task/{id}")
     fun deleteTask(id: Long) {
+        val task = taskReposetory.findById(id).orElse(null)
         taskReposetory.deleteById(id)
+        if (task != null) {
+            notificationService.broadcastNotification("task", "deleted:${task.id}")
+        }
     }
 
     @GetMapping("/task/count")

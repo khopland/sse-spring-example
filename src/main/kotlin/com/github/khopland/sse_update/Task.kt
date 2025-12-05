@@ -9,6 +9,6 @@ import jakarta.persistence.Id
 data class Task(
     @Id
     @GeneratedValue(strategy = GenerationType.AUTO)
-    val id: Long,
+    val id: Long?,
     var description: String,
 )
