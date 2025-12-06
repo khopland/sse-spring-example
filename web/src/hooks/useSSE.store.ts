@@ -51,45 +51,95 @@ const createConnection = (
   errors: [],
 })
 
-class SSEStoreManager {
-  private store = new Store<SSEStoreState>(initialState)
-  private abortControllers = new Map<string, AbortController>()
-  private connectionRefs = new Map<string, number>()
-  private pendingCleanups = new Map<string, number>()
-  private reconnectTimeouts = new Map<string, number | null>()
-  private isConnectingMap = new Map<string, boolean>()
+// Core store instance (TanStack recommended pattern: store + actions)
+const store = new Store<SSEStoreState>(initialState)
 
-  getStore() {
-    return this.store
+// Internal maps for controllers, refs and timers
+const abortControllers = new Map<string, AbortController>()
+const connectionRefs = new Map<string, number>()
+const pendingCleanups = new Map<string, number>()
+const reconnectTimeouts = new Map<string, number | null>()
+const isConnectingMap = new Map<string, boolean>()
+
+function cancelPendingCleanup(id: string) {
+  const timeoutId = pendingCleanups.get(id)
+  if (timeoutId) {
+    clearTimeout(timeoutId)
+    pendingCleanups.delete(id)
   }
+}
 
-  registerConnection(
-    id: string,
-    url: string,
-    clientId: string,
-    abortController: AbortController,
-  ): boolean {
-    this.cancelPendingCleanup(id)
+function incrementRefCount(id: string) {
+  const refCount = connectionRefs.get(id) || 0
+  connectionRefs.set(id, refCount + 1)
+}
 
-    const existing = this.abortControllers.get(id)
+function scheduleCleanup(id: string, onFinalCleanup: () => void) {
+  const timeoutId = window.setTimeout(() => {
+    const currentRefs = connectionRefs.get(id) || 0
+    if (currentRefs === 0) {
+      cleanup(id)
+      onFinalCleanup()
+    }
+  }, CLEANUP_DELAY)
+
+  pendingCleanups.set(id, timeoutId)
+}
+
+function cleanup(id: string) {
+  abortControllers.delete(id)
+  connectionRefs.delete(id)
+  pendingCleanups.delete(id)
+
+  store.setState((state) => {
+    const newConnections = new Map(state.connections)
+    const newActiveConnections = new Set(state.activeConnections)
+
+    newConnections.delete(id)
+    newActiveConnections.delete(id)
+
+    return {
+      connections: newConnections,
+      activeConnections: newActiveConnections,
+    }
+  })
+}
+
+function updateConnectionField(id: string, updates: Partial<SSEConnection>) {
+  store.setState((state) => {
+    const connection = state.connections.get(id)
+    if (!connection) return state
+
+    const newConnections = new Map(state.connections)
+    newConnections.set(id, { ...connection, ...updates })
+
+    return { ...state, connections: newConnections }
+  })
+}
+
+// Exported actions and helpers
+export const sseStore = {
+  // Expose the Store instance for read-only access if needed
+  getStore: () => store,
+
+  registerConnection(id: string, url: string, clientId: string, abortController: AbortController) {
+    cancelPendingCleanup(id)
+
+    const existing = abortControllers.get(id)
     if (existing && !existing.signal.aborted) {
-      this.incrementRefCount(id)
+      incrementRefCount(id)
       return false
     }
 
-    if (existing) {
-      existing.abort()
-    }
+    if (existing) existing.abort()
 
-    this.abortControllers.set(id, abortController)
-    this.connectionRefs.set(id, 1)
-    this.isConnectingMap.set(id, false)
+    abortControllers.set(id, abortController)
+    connectionRefs.set(id, 1)
+    isConnectingMap.set(id, false)
 
     let registered = false
-    this.store.setState((state) => {
-      if (state.activeConnections.has(id)) {
-        return state
-      }
+    store.setState((state) => {
+      if (state.activeConnections.has(id)) return state
 
       registered = true
       const newConnections = new Map(state.connections)
@@ -98,80 +148,71 @@ class SSEStoreManager {
       newActiveConnections.add(id)
       newConnections.set(id, createConnection(id, url, clientId))
 
-      return {
-        connections: newConnections,
-        activeConnections: newActiveConnections,
-      }
+      return { connections: newConnections, activeConnections: newActiveConnections }
     })
 
     return registered
-  }
+  },
 
   unregisterConnection(id: string, onFinalCleanup?: () => void) {
-    const refCount = this.connectionRefs.get(id) || 0
+    const refCount = connectionRefs.get(id) || 0
     if (refCount > 1) {
-      this.connectionRefs.set(id, refCount - 1)
+      connectionRefs.set(id, refCount - 1)
       return false
     }
 
-    const controller = this.abortControllers.get(id)
+    const controller = abortControllers.get(id)
     if (controller && onFinalCleanup) {
-      this.scheduleCleanup(id, onFinalCleanup)
+      scheduleCleanup(id, onFinalCleanup)
     } else {
-      this.cleanup(id)
+      cleanup(id)
     }
 
     return true
-  }
+  },
 
-  getIsConnecting(id: string): boolean {
-    return this.isConnectingMap.get(id) || false
-  }
+  getIsConnecting(id: string) {
+    return isConnectingMap.get(id) || false
+  },
 
   setIsConnecting(id: string, value: boolean) {
-    if (value) {
-      this.isConnectingMap.set(id, true)
-    } else {
-      this.isConnectingMap.delete(id)
-    }
-  }
+    if (value) isConnectingMap.set(id, true)
+    else isConnectingMap.delete(id)
+  },
 
-  getReconnectDelay(id: string): number {
-    const connection = this.store.state.connections.get(id)
+  getReconnectDelay(id: string) {
+    const connection = store.state.connections.get(id)
     return connection ? connection.reconnectDelay : 0
-  }
+  },
 
   setReconnectDelay(id: string, delay: number) {
-    this.updateConnectionField(id, { reconnectDelay: delay })
-  }
+    updateConnectionField(id, { reconnectDelay: delay })
+  },
 
   scheduleReconnectTimer(id: string, delay: number, cb: () => void) {
-    this.clearReconnectTimer(id)
+    const t = reconnectTimeouts.get(id)
+    if (t !== undefined && t !== null) clearTimeout(t)
     const timeoutId = window.setTimeout(() => {
-      this.reconnectTimeouts.delete(id)
+      reconnectTimeouts.delete(id)
       cb()
     }, delay)
-    this.reconnectTimeouts.set(id, timeoutId)
-  }
+    reconnectTimeouts.set(id, timeoutId)
+  },
 
   clearReconnectTimer(id: string) {
-    const t = this.reconnectTimeouts.get(id)
+    const t = reconnectTimeouts.get(id)
     if (t !== undefined && t !== null) {
       clearTimeout(t)
     }
-    this.reconnectTimeouts.delete(id)
-  }
+    reconnectTimeouts.delete(id)
+  },
 
-  getAbortController(id: string): AbortController | undefined {
-    return this.abortControllers.get(id)
-  }
+  getAbortController(id: string) {
+    return abortControllers.get(id)
+  },
 
-  updateConnectionStatus(
-    id: string,
-    status: SSEConnection['status'],
-    reconnectDelay?: number,
-  ) {
-    this.store.setState((state) => {
+  updateConnectionStatus(id: string, status: SSEConnection['status'], reconnectDelay?: number) {
+    store.setState((state) => {
       const connection = state.connections.get(id)
       if (!connection) return state
 
@@ -185,25 +226,22 @@ class SSEStoreManager {
         updated.disconnectedAt = Date.now()
       }
 
-      if (reconnectDelay !== undefined) {
-        updated.reconnectDelay = reconnectDelay
-      }
+      if (reconnectDelay !== undefined) updated.reconnectDelay = reconnectDelay
 
       const newConnections = new Map(state.connections)
       newConnections.set(id, updated)
 
       return { ...state, connections: newConnections }
     })
-  }
+  },
 
   addMessage(id: string, message: SSEMessage) {
-    this.store.setState((state) => {
+    store.setState((state) => {
       const connection = state.connections.get(id)
       if (!connection) return state
 
       const messages = [...connection.messages, message]
-      const trimmedMessages =
-        messages.length > MAX_MESSAGES ? messages.slice(-MAX_MESSAGES) : messages
+      const trimmedMessages = messages.length > MAX_MESSAGES ? messages.slice(-MAX_MESSAGES) : messages
 
       const newConnections = new Map(state.connections)
       newConnections.set(id, {
@@ -215,10 +253,10 @@ class SSEStoreManager {
 
       return { ...state, connections: newConnections }
     })
-  }
+  },
 
   addError(id: string, error: Error) {
-    this.store.setState((state) => {
+    store.setState((state) => {
       const connection = state.connections.get(id)
       if (!connection) return state
 
@@ -235,96 +273,33 @@ class SSEStoreManager {
 
       return { ...state, connections: newConnections }
     })
-  }
+  },
 
-  hasActiveConnection(id: string): boolean {
-    const controller = this.abortControllers.get(id)
+  hasActiveConnection(id: string) {
+    const controller = abortControllers.get(id)
     return controller !== undefined && !controller.signal.aborted
-  }
+  },
 
-  getConnections(): SSEConnection[] {
-    return Array.from(this.store.state.connections.values())
-  }
+  getConnections() {
+    return Array.from(store.state.connections.values())
+  },
 
-  getConnection(id: string): SSEConnection | undefined {
-    return this.store.state.connections.get(id)
-  }
+  getConnection(id: string) {
+    return store.state.connections.get(id)
+  },
 
   clearMessages(id: string) {
-    this.updateConnectionField(id, {
-      messages: [],
-      messageCount: 0,
-      lastMessage: null,
-    })
-  }
+    updateConnectionField(id, { messages: [], messageCount: 0, lastMessage: null })
+  },
 
   clearErrors(id: string) {
-    this.updateConnectionField(id, {
-      errors: [],
-      errorCount: 0,
-      lastError: null,
-    })
-  }
+    updateConnectionField(id, { errors: [], errorCount: 0, lastError: null })
+  },
 
-  private cancelPendingCleanup(id: string) {
-    const timeoutId = this.pendingCleanups.get(id)
-    if (timeoutId) {
-      clearTimeout(timeoutId)
-      this.pendingCleanups.delete(id)
-    }
-  }
-
-  private incrementRefCount(id: string) {
-    const refCount = this.connectionRefs.get(id) || 0
-    this.connectionRefs.set(id, refCount + 1)
-  }
-
-  private scheduleCleanup(id: string, onFinalCleanup: () => void) {
-    const timeoutId = window.setTimeout(() => {
-      const currentRefs = this.connectionRefs.get(id) || 0
-      if (currentRefs === 0) {
-        this.cleanup(id)
-        onFinalCleanup()
-      }
-    }, CLEANUP_DELAY)
-
-    this.pendingCleanups.set(id, timeoutId)
-  }
-
-  private cleanup(id: string) {
-    this.abortControllers.delete(id)
-    this.connectionRefs.delete(id)
-    this.pendingCleanups.delete(id)
-
-    this.store.setState((state) => {
-      const newConnections = new Map(state.connections)
-      const newActiveConnections = new Set(state.activeConnections)
-
-      newConnections.delete(id)
-      newActiveConnections.delete(id)
-
-      return {
-        connections: newConnections,
-        activeConnections: newActiveConnections,
-      }
-    })
-  }
-
-  private updateConnectionField(
-    id: string,
-    updates: Partial<SSEConnection>,
-  ) {
-    this.store.setState((state) => {
-      const connection = state.connections.get(id)
-      if (!connection) return state
-
-      const newConnections = new Map(state.connections)
-      newConnections.set(id, { ...connection, ...updates })
-
-      return { ...state, connections: newConnections }
-    })
-  }
+  resetConnectionState(id: string) {
+    sseStore.clearReconnectTimer(id)
+    sseStore.setReconnectDelay(id, 0)
+    sseStore.setIsConnecting(id, false)
+  },
 }
 
-export const sseStore = new SSEStoreManager()
-export const sseStoreInstance = sseStore.getStore()

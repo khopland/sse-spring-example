@@ -12,6 +12,14 @@ const MAX_RECONNECT_DELAY = 30000
 const INITIAL_RECONNECT_DELAY = 1000
 const FETCH_TIMEOUT = 10000
 
+// SSE line prefixes for parsing
+const SSE_PREFIXES = {
+  event: 'event:',
+  data: 'data:',
+  id: 'id:',
+  comment: ':',
+} as const
+
 type StartConnectionParams = {
   connectionId: string
   url: string
@@ -33,6 +41,13 @@ function startConnection({
   let currentData = ''
   let currentId = ''
   let currentComment = ''
+
+  const resetMessage = () => {
+    currentEvent = ''
+    currentData = ''
+    currentId = ''
+    currentComment = ''
+  }
 
   const scheduleReconnect = () => {
     sseStore.clearReconnectTimer(connectionId)
@@ -79,13 +94,20 @@ function startConnection({
         signal: abortController.signal,
       })
 
+      // Capture timeout id to ensure proper cleanup
+      let timeoutId: number | null = null
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
+        timeoutId = window.setTimeout(() => {
           reject(new Error('Fetch timeout: Request took longer than 10 seconds'))
         }, FETCH_TIMEOUT)
       })
 
-      const response = await Promise.race([fetchPromise, timeoutPromise])
+      let response: Response
+      try {
+        response = (await Promise.race([fetchPromise, timeoutPromise])) as Response
+      } finally {
+        if (timeoutId !== null) clearTimeout(timeoutId)
+      }
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
@@ -114,14 +136,14 @@ function startConnection({
         const lines = chunk.split('\n')
 
         for (const line of lines) {
-          if (line.startsWith('event:')) {
-            currentEvent = line.substring(6).trim()
-          } else if (line.startsWith('data:')) {
-            currentData = line.substring(5).trim()
-          } else if (line.startsWith('id:')) {
-            currentId = line.substring(3).trim()
-          } else if (line.startsWith(':')) {
-            currentComment = line.substring(1).trim()
+          if (line.startsWith(SSE_PREFIXES.event)) {
+            currentEvent = line.substring(SSE_PREFIXES.event.length).trim()
+          } else if (line.startsWith(SSE_PREFIXES.data)) {
+            currentData = line.substring(SSE_PREFIXES.data.length).trim()
+          } else if (line.startsWith(SSE_PREFIXES.id)) {
+            currentId = line.substring(SSE_PREFIXES.id.length).trim()
+          } else if (line.startsWith(SSE_PREFIXES.comment)) {
+            currentComment = line.substring(SSE_PREFIXES.comment.length).trim()
           } else if (line === '') {
             if (currentData) {
               const message: SSEMessage = {
@@ -132,10 +154,7 @@ function startConnection({
               }
               sseStore.addMessage(connectionId, message)
               onMessage(message)
-              currentEvent = ''
-              currentData = ''
-              currentId = ''
-              currentComment = ''
+              resetMessage()
             }
           }
         }
@@ -143,10 +162,12 @@ function startConnection({
     } catch (error) {
       sseStore.setIsConnecting(connectionId, false)
 
+      // Suppress abort errors (expected during cleanup)
       if (error instanceof Error && error.name === 'AbortError') {
         return
       }
 
+      // Normalize error to Error instance
       const errorObj = error instanceof Error ? error : new Error(String(error))
       sseStore.addError(connectionId, errorObj)
       sseStore.updateConnectionStatus(connectionId, 'error')
@@ -178,13 +199,11 @@ export function useSSE(
   useEffect(() => {
     const connectionId = connectionIdRef.current
 
-    const existingController = sseStore.getAbortController(connectionId)
-    if (existingController && !existingController.signal.aborted) {
-      return
-    }
+    // If an active controller exists, another hook/consumer already manages this connection.
+    if (sseStore.hasActiveConnection(connectionId)) return
 
-    const existingConnection = sseStore.getConnection(connectionId)
-    if (existingConnection && (!existingController || existingController.signal.aborted)) {
+    // If there's a leftover connection record without an active controller, remove it.
+    if (sseStore.getConnection(connectionId) && !sseStore.hasActiveConnection(connectionId)) {
       sseStore.unregisterConnection(connectionId)
     }
 
@@ -214,9 +233,7 @@ export function useSSE(
     return () => {
       sseStore.unregisterConnection(connectionId, () => {
         abortController.abort()
-        sseStore.clearReconnectTimer(connectionId)
-        sseStore.setReconnectDelay(connectionId, INITIAL_RECONNECT_DELAY)
-        sseStore.setIsConnecting(connectionId, false)
+        sseStore.resetConnectionState(connectionId)
       })
     }
   }, [url, clientId])

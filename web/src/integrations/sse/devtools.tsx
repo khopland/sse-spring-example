@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useStore } from '@tanstack/react-store'
-import { sseStore, sseStoreInstance, type SSEConnection } from '@/hooks/useSSE.store'
+import { sseStore, type SSEConnection } from '@/hooks/useSSE.store'
 import { Trash2, AlertCircle, CheckCircle2, XCircle, RefreshCw } from 'lucide-react'
 
 function SSEConnectionCard({ connection }: { connection: SSEConnection }) {
@@ -258,7 +258,7 @@ function SSEConnectionCard({ connection }: { connection: SSEConnection }) {
 }
 
 export default function SSEDevtoolsPanel() {
-  const storeState = useStore(sseStoreInstance)
+  const storeState = useStore(sseStore.getStore())
   const connections = Array.from(storeState.connections.values())
 
   return (
