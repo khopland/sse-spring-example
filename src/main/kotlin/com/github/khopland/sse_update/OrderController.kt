@@ -1,12 +1,6 @@
 package com.github.khopland.sse_update
 
-import org.springframework.web.bind.annotation.DeleteMapping
-import org.springframework.web.bind.annotation.GetMapping
-import org.springframework.web.bind.annotation.PostMapping
-import org.springframework.web.bind.annotation.PutMapping
-import org.springframework.web.bind.annotation.RequestBody
-import org.springframework.web.bind.annotation.RequestHeader
-import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.bind.annotation.*
 
 
 @RestController
@@ -21,7 +15,7 @@ class TaskController(
     }
 
     @GetMapping("/task/{id}")
-    fun getTask(id: Long): Task? {
+    fun getTask(@PathVariable id: Long): Task? {
         return taskReposetory.findById(id).orElse(null)
     }
 
@@ -34,7 +28,7 @@ class TaskController(
     }
 
     @PutMapping("/task/{id}")
-    fun updateTask(@RequestHeader("klientId") klientId: String?, id: Long, @RequestBody task: Task): Task {
+    fun updateTask(@RequestHeader("klientId") klientId: String?, @PathVariable id: Long, @RequestBody task: Task): Task {
         val updatedTask = taskReposetory
             .findById(id)
             .orElseThrow { RuntimeException("Task not found") }
@@ -47,7 +41,7 @@ class TaskController(
     }
 
     @DeleteMapping("/task/{id}")
-    fun deleteTask(@RequestHeader("klientId") klientId: String?, id: Long) {
+    fun deleteTask(@RequestHeader("klientId") klientId: String?, @PathVariable id: Long) {
         val task = taskReposetory.findById(id).orElse(null)
         taskReposetory.deleteById(id)
         if (task != null) {

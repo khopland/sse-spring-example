@@ -1,6 +1,8 @@
 package com.github.khopland.sse_update
 
 import jakarta.jms.Topic
+import org.springframework.context.ApplicationListener
+import org.springframework.context.event.ContextClosedEvent
 import org.springframework.jms.annotation.JmsListener
 import org.springframework.jms.core.JmsClient
 import org.springframework.scheduling.annotation.Scheduled
@@ -12,13 +14,11 @@ import java.util.concurrent.ConcurrentHashMap
 class NotificationService(
     private val jmsClient: JmsClient,
     private val notificationTopic: Topic
-) {
+) : ApplicationListener<ContextClosedEvent> {
     private val emitters = ConcurrentHashMap<String, SseEmitter>()
 
     fun addEmitter(emitter: SseEmitter, klientId: String) {
-        if (emitters.containsKey(klientId)) {
-            throw RuntimeException("There is already a live for $klientId")
-        }
+        emitters[klientId]?.complete()
         emitters[klientId] = emitter
         emitter.onCompletion {
             emitters.remove(klientId)
@@ -47,7 +47,7 @@ class NotificationService(
 
         emitters.forEach { (k, emitter) ->
             try {
-                if(message.klientId == k){
+                if (message.klientId == k) {
                     return@forEach
                 }
                 emitter.send(
@@ -83,5 +83,9 @@ class NotificationService(
 
         // Remove dead emitters
         deadEmitters.forEach { emitters.remove(it) }
+    }
+
+    override fun onApplicationEvent(event: ContextClosedEvent) {
+        emitters.values.forEach { it.complete() }
     }
 }
