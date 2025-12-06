@@ -3,11 +3,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api, type Task } from '@/lib/api'
 import { clientId } from '@/lib/clientId'
-import { useSSE } from '@/hooks/useSSE'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Trash2, Edit2, Plus, Check, X } from 'lucide-react'
+import { useSSE } from '@/hooks/useSSE'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 
@@ -34,8 +34,7 @@ function TasksPage() {
 
   // Create mutation
   const createMutation = useMutation({
-    mutationFn: (task: Omit<Task, 'id'>) =>
-      api.tasks.create(task, clientId),
+    mutationFn: (task: Omit<Task, 'id'>) => api.tasks.create(task, clientId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       setNewTaskDescription('')
@@ -63,6 +62,7 @@ function TasksPage() {
   })
 
   // SSE connection
+
   useSSE(
     `${API_BASE_URL}/notifcation`,
     clientId,
@@ -129,7 +129,8 @@ function TasksPage() {
       <div className="container mx-auto p-6">
         <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
           <p className="text-red-800 dark:text-red-200">
-            Error loading tasks: {error instanceof Error ? error.message : 'Unknown error'}
+            Error loading tasks:{' '}
+            {error instanceof Error ? error.message : 'Unknown error'}
           </p>
         </div>
       </div>
@@ -178,7 +179,9 @@ function TasksPage() {
             <div className="flex gap-2">
               <Button
                 onClick={handleAddTask}
-                disabled={!newTaskDescription.trim() || createMutation.isPending}
+                disabled={
+                  !newTaskDescription.trim() || createMutation.isPending
+                }
               >
                 <Check className="mr-2" />
                 Add Task
@@ -233,7 +236,9 @@ function TasksPage() {
                   <div className="flex gap-2">
                     <Button
                       onClick={() => handleSaveEdit(task.id!)}
-                      disabled={!editDescription.trim() || updateMutation.isPending}
+                      disabled={
+                        !editDescription.trim() || updateMutation.isPending
+                      }
                       size="sm"
                     >
                       <Check className="mr-2" />
@@ -286,4 +291,3 @@ function TasksPage() {
     </div>
   )
 }
-
