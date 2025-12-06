@@ -56,6 +56,8 @@ class SSEStoreManager {
   private abortControllers = new Map<string, AbortController>()
   private connectionRefs = new Map<string, number>()
   private pendingCleanups = new Map<string, number>()
+  private reconnectTimeouts = new Map<string, number | null>()
+  private isConnectingMap = new Map<string, boolean>()
 
   getStore() {
     return this.store
@@ -81,6 +83,7 @@ class SSEStoreManager {
 
     this.abortControllers.set(id, abortController)
     this.connectionRefs.set(id, 1)
+    this.isConnectingMap.set(id, false)
 
     let registered = false
     this.store.setState((state) => {
@@ -119,6 +122,44 @@ class SSEStoreManager {
     }
 
     return true
+  }
+
+  getIsConnecting(id: string): boolean {
+    return this.isConnectingMap.get(id) || false
+  }
+
+  setIsConnecting(id: string, value: boolean) {
+    if (value) {
+      this.isConnectingMap.set(id, true)
+    } else {
+      this.isConnectingMap.delete(id)
+    }
+  }
+
+  getReconnectDelay(id: string): number {
+    const connection = this.store.state.connections.get(id)
+    return connection ? connection.reconnectDelay : 0
+  }
+
+  setReconnectDelay(id: string, delay: number) {
+    this.updateConnectionField(id, { reconnectDelay: delay })
+  }
+
+  scheduleReconnectTimer(id: string, delay: number, cb: () => void) {
+    this.clearReconnectTimer(id)
+    const timeoutId = window.setTimeout(() => {
+      this.reconnectTimeouts.delete(id)
+      cb()
+    }, delay)
+    this.reconnectTimeouts.set(id, timeoutId)
+  }
+
+  clearReconnectTimer(id: string) {
+    const t = this.reconnectTimeouts.get(id)
+    if (t !== undefined && t !== null) {
+      clearTimeout(t)
+    }
+    this.reconnectTimeouts.delete(id)
   }
 
   getAbortController(id: string): AbortController | undefined {
