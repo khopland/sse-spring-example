@@ -1,8 +1,8 @@
 package com.github.khopland.sse_update
 
+import jakarta.annotation.PreDestroy
 import jakarta.jms.Topic
-import org.springframework.context.ApplicationListener
-import org.springframework.context.event.ContextClosedEvent
+import org.springframework.context.SmartLifecycle
 import org.springframework.jms.annotation.JmsListener
 import org.springframework.jms.core.JmsClient
 import org.springframework.scheduling.annotation.Scheduled
@@ -14,7 +14,7 @@ import java.util.concurrent.ConcurrentHashMap
 class NotificationService(
     private val jmsClient: JmsClient,
     private val notificationTopic: Topic
-) : ApplicationListener<ContextClosedEvent> {
+) : SmartLifecycle {
     private val emitters = ConcurrentHashMap<String, SseEmitter>()
 
     fun addEmitter(emitter: SseEmitter, klientId: String) {
@@ -69,7 +69,7 @@ class NotificationService(
         deadEmitters.forEach { emitters.remove(it) }
     }
 
-    @Scheduled(fixedRate = 5000) // Send heartbeat every 5 seconds
+    @Scheduled(fixedRate = 10000) // Send heartbeat every 10 seconds
     fun sendHeartbeat() {
         val deadEmitters = mutableListOf<String>()
 
@@ -85,7 +85,22 @@ class NotificationService(
         deadEmitters.forEach { emitters.remove(it) }
     }
 
-    override fun onApplicationEvent(event: ContextClosedEvent) {
+    @PreDestroy
+    fun destroy() {
         emitters.values.forEach { it.complete() }
     }
+
+    override fun start() {
+    }
+
+    override fun stop() {
+        println("Stopping ${emitters.size} emitters...")
+        emitters.values.forEach { it.complete() }
+        emitters.clear()
+    }
+
+    override fun isRunning(): Boolean {
+        return emitters.isNotEmpty()
+    }
+
 }
