@@ -5,6 +5,7 @@ import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.PutMapping
 import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RestController
 
 
@@ -25,15 +26,15 @@ class TaskController(
     }
 
     @PostMapping("/task")
-    fun saveTask(@RequestBody task: Task): Task {
+    fun saveTask(@RequestHeader("klientId") klientId: String?, @RequestBody task: Task): Task {
 
         val savedTask = taskReposetory.save(task)
-        notificationService.broadcastNotification("task", "crate:${task.id}")
+        notificationService.broadcastNotification("task", "crate", "${task.id}", klientId)
         return savedTask
     }
 
     @PutMapping("/task/{id}")
-    fun updateTask(id: Long, @RequestBody task: Task): Task {
+    fun updateTask(@RequestHeader("klientId") klientId: String?, id: Long, @RequestBody task: Task): Task {
         val updatedTask = taskReposetory
             .findById(id)
             .orElseThrow { RuntimeException("Task not found") }
@@ -41,16 +42,16 @@ class TaskController(
                 description = task.description
             }
         val savedTask = taskReposetory.save(updatedTask)
-        notificationService.broadcastNotification("task", "update:${savedTask.id}")
+        notificationService.broadcastNotification("task", "update", "${savedTask.id}", klientId)
         return savedTask
     }
 
     @DeleteMapping("/task/{id}")
-    fun deleteTask(id: Long) {
+    fun deleteTask(@RequestHeader("klientId") klientId: String?, id: Long) {
         val task = taskReposetory.findById(id).orElse(null)
         taskReposetory.deleteById(id)
         if (task != null) {
-            notificationService.broadcastNotification("task", "deleted:${task.id}")
+            notificationService.broadcastNotification("task", "deleted", "${task.id}", klientId)
         }
     }
 

@@ -6,29 +6,32 @@ import org.springframework.jms.core.JmsClient
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Service
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter
-import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ConcurrentHashMap
 
 @Service
 class NotificationService(
     private val jmsClient: JmsClient,
     private val notificationTopic: Topic
 ) {
-    private val emitters = CopyOnWriteArrayList<SseEmitter>()
+    private val emitters = ConcurrentHashMap<String, SseEmitter>()
 
-    fun addEmitter(emitter: SseEmitter) {
-        emitters.add(emitter)
+    fun addEmitter(emitter: SseEmitter, klientId: String) {
+        if (emitters.containsKey(klientId)) {
+            throw RuntimeException("There is already a live for $klientId")
+        }
+        emitters[klientId] = emitter
         emitter.onCompletion {
-            emitters.remove(emitter)
+            emitters.remove(klientId)
         }
         emitter.onTimeout {
-            emitters.remove(emitter)
+            emitters.remove(klientId)
         }
     }
 
-    fun broadcastNotification(topic: String, message: String) {
+    fun broadcastNotification(topic: String, message: String, id: String?, klientId: String?) {
         // Send to JMS topic for multi-server broadcasting
         // The JMS listener will handle broadcasting to all servers (including this one)
-        val notificationMessage = NotificationMessage(topic, message)
+        val notificationMessage = NotificationMessage(topic, message, id, klientId)
         jmsClient.destination(notificationTopic).send(notificationMessage)
     }
 
@@ -36,37 +39,49 @@ class NotificationService(
     fun receiveJmsNotification(notificationMessage: NotificationMessage) {
         // Broadcast to local emitters when receiving from JMS
         // This ensures all servers (including the originating one) broadcast to their clients
-        broadcastToLocalEmitters(notificationMessage.topic, notificationMessage.message)
+        broadcastToLocalEmitters(notificationMessage)
     }
 
-    private fun broadcastToLocalEmitters(topic: String, message: String) {
-        val deadEmitters = mutableListOf<SseEmitter>()
+    private fun broadcastToLocalEmitters(message: NotificationMessage) {
+        val deadEmitters = mutableListOf<String>()
 
-        emitters.forEach { emitter ->
+        emitters.forEach { (k, emitter) ->
             try {
-                emitter.send(SseEmitter.event().name(topic).data(message).build())
+                if(message.klientId == k){
+                    return@forEach
+                }
+                emitter.send(
+                    SseEmitter.event()
+                        .apply {
+                            if (message.id != null) id(message.id)
+                            if (message.klientId != null) comment(message.klientId)
+                        }
+                        .name(message.topic)
+                        .data(message.message)
+                        .build()
+                )
             } catch (_: Exception) {
-                deadEmitters.add(emitter)
+                deadEmitters.add(k)
             }
         }
 
         // Remove dead emitters
-        emitters.removeAll(deadEmitters)
+        deadEmitters.forEach { emitters.remove(it) }
     }
 
-    @Scheduled(fixedRate = 10000) // Send heartbeat every 10 seconds
+    @Scheduled(fixedRate = 5000) // Send heartbeat every 5 seconds
     fun sendHeartbeat() {
-        val deadEmitters = mutableListOf<SseEmitter>()
+        val deadEmitters = mutableListOf<String>()
 
-        emitters.forEach { emitter ->
+        emitters.forEach { (k, emitter) ->
             try {
                 emitter.send(SseEmitter.event().name("heartbeat").data("ping").build())
             } catch (_: Exception) {
-                deadEmitters.add(emitter)
+                deadEmitters.add(k)
             }
         }
 
         // Remove dead emitters
-        emitters.removeAll(deadEmitters)
+        deadEmitters.forEach { emitters.remove(it) }
     }
 }
