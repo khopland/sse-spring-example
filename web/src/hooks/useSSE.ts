@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { sseStore } from './useSSE.store'
 
 export interface SSEMessage {
   event: string
@@ -7,6 +8,10 @@ export interface SSEMessage {
   comment?: string
 }
 
+const MAX_RECONNECT_DELAY = 30000
+const INITIAL_RECONNECT_DELAY = 1000
+const FETCH_TIMEOUT = 10000
+
 export function useSSE(
   url: string,
   clientId: string,
@@ -14,56 +19,66 @@ export function useSSE(
   onError?: (error: Event) => void,
 ) {
   const abortControllerRef = useRef<AbortController | null>(null)
-  const onMessageRef = useRef(onMessage)
-  const onErrorRef = useRef(onError)
   const reconnectTimeoutRef = useRef<number | null>(null)
-  const reconnectDelayRef = useRef<number>(1000) // Start with 1 second
+  const reconnectDelayRef = useRef<number>(INITIAL_RECONNECT_DELAY)
   const isConnectingRef = useRef<boolean>(false)
+  const connectionIdRef = useRef<string>(
+    `sse-${btoa(`${url}:${clientId}`).replace(/[+/=]/g, '')}`,
+  )
 
-  // Keep refs up to date without triggering re-connection
-  useEffect(() => {
-    onMessageRef.current = onMessage
-    onErrorRef.current = onError
-  }, [onMessage, onError])
 
   useEffect(() => {
+    const connectionId = connectionIdRef.current
+
+    const existingController = sseStore.getAbortController(connectionId)
+    if (existingController && !existingController.signal.aborted) {
+      return
+    }
+
+    const existingConnection = sseStore.getConnection(connectionId)
+    if (existingConnection && (!existingController || existingController.signal.aborted)) {
+      sseStore.unregisterConnection(connectionId)
+    }
+
     const abortController = new AbortController()
     abortControllerRef.current = abortController
+
+    const registered = sseStore.registerConnection(
+      connectionId,
+      url,
+      clientId,
+      abortController,
+    )
+    if (!registered) {
+      return
+    }
 
     let currentEvent = ''
     let currentData = ''
     let currentId = ''
     let currentComment = ''
 
-    const MAX_RECONNECT_DELAY = 30000 // 30 seconds max
-    const INITIAL_RECONNECT_DELAY = 1000 // 1 second initial
-
     const scheduleReconnect = () => {
-      // Clear any existing timeout
       if (reconnectTimeoutRef.current !== null) {
         clearTimeout(reconnectTimeoutRef.current)
       }
 
-      // Don't reconnect if aborted
-      if (abortController.signal.aborted) {
+      if (abortController.signal.aborted || isConnectingRef.current) {
         return
       }
 
-      // Don't reconnect if already connecting
-      if (isConnectingRef.current) {
-        return
-      }
-
-      console.log(
-        `SSE: Reconnecting in ${reconnectDelayRef.current}ms...`,
+      sseStore.updateConnectionStatus(
+        connectionId,
+        'reconnecting',
+        reconnectDelayRef.current,
       )
+
       reconnectTimeoutRef.current = window.setTimeout(() => {
         if (!abortController.signal.aborted) {
           connect()
         }
       }, reconnectDelayRef.current)
 
-      // Exponential backoff: double the delay, but cap at MAX_RECONNECT_DELAY
       reconnectDelayRef.current = Math.min(
         reconnectDelayRef.current * 2,
         MAX_RECONNECT_DELAY,
@@ -71,15 +86,15 @@ export function useSSE(
     }
 
     const connect = async () => {
-      // Prevent multiple simultaneous connection attempts
       if (isConnectingRef.current) {
         return
       }
 
       isConnectingRef.current = true
+      sseStore.updateConnectionStatus(connectionId, 'connecting')
 
       try {
-        const response = await fetch(url, {
+        const fetchPromise = fetch(url, {
           method: 'GET',
           headers: {
             Accept: 'text/event-stream',
@@ -88,28 +103,34 @@ export function useSSE(
           signal: abortController.signal,
         })
 
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('Fetch timeout: Request took longer than 10 seconds'))
+          }, FETCH_TIMEOUT)
+        })
+
+        const response = await Promise.race([fetchPromise, timeoutPromise])
+
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`)
         }
 
-        // Reset reconnect delay on successful connection
-        reconnectDelayRef.current = INITIAL_RECONNECT_DELAY
-        console.log('SSE: Connected successfully')
-
-        const reader = response.body?.getReader()
-        const decoder = new TextDecoder()
-
-        if (!reader) {
-          throw new Error('No reader available')
+        if (!response.body) {
+          throw new Error('Response body is null - not a valid SSE stream')
         }
+
+        reconnectDelayRef.current = INITIAL_RECONNECT_DELAY
+        sseStore.updateConnectionStatus(connectionId, 'connected')
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
 
         while (true) {
           const { done, value } = await reader.read()
 
           if (done) {
-            // Connection closed by server
-            console.log('SSE: Connection closed by server, reconnecting...')
             isConnectingRef.current = false
+            sseStore.updateConnectionStatus(connectionId, 'disconnected')
             scheduleReconnect()
             break
           }
@@ -127,14 +148,15 @@ export function useSSE(
             } else if (line.startsWith(':')) {
               currentComment = line.substring(1).trim()
             } else if (line === '') {
-              // Empty line indicates end of message
               if (currentData) {
-                onMessageRef.current({
+                const message: SSEMessage = {
                   event: currentEvent || 'message',
                   data: currentData,
                   id: currentId || undefined,
                   comment: currentComment || undefined,
-                })
+                }
+                sseStore.addMessage(connectionId, message)
+                onMessage(message)
                 currentEvent = ''
                 currentData = ''
                 currentId = ''
@@ -147,15 +169,19 @@ export function useSSE(
         isConnectingRef.current = false
 
         if (error instanceof Error && error.name === 'AbortError') {
-          return // Cleanup, not an error
+          return
         }
+
+        const errorObj =
+          error instanceof Error ? error : new Error(String(error))
+        sseStore.addError(connectionId, errorObj)
+        sseStore.updateConnectionStatus(connectionId, 'error')
 
         console.error('SSE error:', error)
-        if (onErrorRef.current) {
-          onErrorRef.current(error as Event)
+        if (onError) {
+          onError(error as Event)
         }
 
-        // Schedule reconnection on error
         scheduleReconnect()
       }
     }
@@ -163,14 +189,15 @@ export function useSSE(
     connect()
 
     return () => {
-      abortController.abort()
-      if (reconnectTimeoutRef.current !== null) {
-        clearTimeout(reconnectTimeoutRef.current)
-        reconnectTimeoutRef.current = null
-      }
-      reconnectDelayRef.current = INITIAL_RECONNECT_DELAY
-      isConnectingRef.current = false
+      sseStore.unregisterConnection(connectionId, () => {
+        abortController.abort()
+        if (reconnectTimeoutRef.current !== null) {
+          clearTimeout(reconnectTimeoutRef.current)
+          reconnectTimeoutRef.current = null
+        }
+        reconnectDelayRef.current = INITIAL_RECONNECT_DELAY
+        isConnectingRef.current = false
+      })
     }
   }, [url, clientId])
 }
-
