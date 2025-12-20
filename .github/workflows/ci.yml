@@ -62,3 +62,6 @@ jobs:
       - name: Build frontend
         working-directory: ./web
         run: pnpm run build
+      - name: test frontend
+        working-directory: ./web
+        run: pnpm run test 
